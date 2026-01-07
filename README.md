@@ -12,6 +12,7 @@ Infrastructure is managed with Terragrunt + official Terraform Registry modules 
 - [Required GitHub Secrets](#ci-cd-github-actions)
 - [New Relic Infrastructure (ECS)](#new-relic-infrastructure-ecs)
 - [Troubleshooting](#troubleshooting)
+ - [Staging Environment](#staging-environment)
 
 ## Overview of the Infrastructure
 - VPC + Subnets: [infra/dev/us-east-1/vpc/vpc1](infra/dev/us-east-1/vpc/vpc1)
@@ -112,6 +113,55 @@ All stacks use official modules via Git sources:
 - Set region in [infra/dev/us-east-1/region.hcl](infra/dev/us-east-1/region.hcl)
 	- Ensure it matches your target region (e.g., `us-east-1`).
 - Provider is generated per stack; you can also override via `AWS_REGION` env var.
+
+## Staging Environment
+- Reuse the same shared modules in [infra/_envcommon](infra/_envcommon) to create a staging environment.
+- Create a new environment folder parallel to `dev/`, for example:
+
+```
+infra/
+	_envcommon/
+	dev/
+		us-east-1/
+			...
+	staging/
+		account.hcl
+		us-east-1/
+			region.hcl
+			vpc/
+				vpc1/terragrunt.hcl
+			sgs/
+				hello-world-alb-sg/terragrunt.hcl
+				hello-world-ecs-sg/terragrunt.hcl
+			alb/
+				hello-world-alb/terragrunt.hcl
+			ecr/
+				hello-world/terragrunt.hcl
+			ecs-clusters/
+				hello-world-cluster/terragrunt.hcl
+			ecs-services/
+				hello-world-service/terragrunt.hcl
+```
+
+- In `staging/account.hcl`, set `locals.environment = "staging"` to tag resources accordingly.
+- In `staging/us-east-1/region.hcl`, set your target region (for example `us-east-1`).
+- Each stack should include its corresponding envcommon module file (e.g., ALB stacks include [infra/_envcommon/alb.hcl](infra/_envcommon/alb.hcl)).
+- Remote state keys automatically remain distinct per folder via [infra/terragrunt.hcl](infra/terragrunt.hcl) using `path_relative_to_include()`.
+
+Apply staging the same way as dev:
+```bash
+cd infra/staging/us-east-1/vpc/vpc1 && terragrunt apply
+cd ../../sgs/hello-world-alb-sg && terragrunt apply
+cd ../../sgs/hello-world-ecs-sg && terragrunt apply
+cd ../../alb/hello-world-alb && terragrunt apply
+cd ../../ecr/hello-world && terragrunt apply
+cd ../../ecs-clusters/hello-world-cluster && terragrunt apply
+cd ../../ecs-services/hello-world-service && terragrunt apply
+```
+
+Tips:
+- If staging uses a different AWS account, export credentials or assume-role before apply.
+- Use `terragrunt run-all plan`/`apply` from `infra/staging/us-east-1` to orchestrate all stacks.
 
 ## Build Order (Dev us-east-1)
 Apply in this order to satisfy dependencies:
