@@ -13,7 +13,7 @@ Infrastructure is managed with Terragrunt + official Terraform Registry modules 
 - [New Relic Infrastructure (ECS)](#new-relic-infrastructure-ecs)
 - [Disaster Recovery](#disaster-recovery)
 - [Troubleshooting](#troubleshooting)
- - [Staging Environment](#staging-environment)
+ - [Multi-Environment Support](#staging-environment)
 
 ## Overview of the Infrastructure
 - VPC + Subnets: [infra/dev/us-east-1/vpc/vpc1](infra/dev/us-east-1/vpc/vpc1)
