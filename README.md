@@ -34,7 +34,7 @@ Key characteristics:
 ```
 					Internet
 						 |
-					 Route 53 (optional)
+					 Route 53
 						 |
 					 Application Load Balancer
 						 |
