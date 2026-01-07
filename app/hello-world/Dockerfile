@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.6
 # Multi-stage build for a Java REST API (Spring Boot compatible)
 # Stage 1: Build (uses Maven + JDK)
 FROM maven:3.9.6-eclipse-temurin-21 AS build
@@ -35,4 +36,4 @@ USER app
 
 # Reasonable JVM defaults for containers
 ENV JAVA_OPTS="-XX:MaxRAMPercentage=75.0 -XX:InitialRAMPercentage=25.0"
-ENTRYPOINT ["sh", "-lc", "exec java $JAVA_OPTS -jar /app/app.jar"]
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]
