@@ -44,11 +44,11 @@ jobs:
           cache: 'maven'
 
       - name: Run tests
-        working-directory: ${{ env.APP_PATH }}
+        working-directory: ${{ env.APP_PATH/app/hello-world }}
         run: mvn -B -DskipTests=false test
 
       - name: Package (build jar)
-        working-directory: ${{ env.APP_PATH }}
+        working-directory: ${{ env.APP_PATH/app/hello-world }}
         run: mvn -B -DskipTests package
 
   build_and_push:
