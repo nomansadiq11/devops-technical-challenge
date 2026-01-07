@@ -266,6 +266,54 @@ This project supports New Relic for both infrastructure metrics (via the AWS→N
 Notes:
 - Do not commit license keys. The sample file at [newrelic-infra/newrelic-infra.yml](newrelic-infra/newrelic-infra.yml) should be replaced by secrets in AWS Secrets Manager or SSM Parameter Store and referenced from the ECS task definition.
 
+### Agent configuration in Dockerfile
+- The Java agent is installed and enabled in [app/hello-world/Dockerfile](app/hello-world/Dockerfile):
+	- `newrelic.jar` and `newrelic.yml` are downloaded at build time.
+	- `JAVA_OPTS` includes `-javaagent:/app/newrelic.jar` and sets `newrelic.config.app_name` and `newrelic.config.license_key` from environment.
+	- Provide `NEW_RELIC_LICENSE_KEY` as a secret (ECS task definition) and set `NEW_RELIC_APP_NAME` as an environment variable.
+	- Entrypoint runs `java $JAVA_OPTS -jar /app/app.jar` so the agent is active.
+
+Required configuration (secrets/credentials)
+- `NEW_RELIC_LICENSE_KEY`: Store in AWS Secrets Manager or SSM; reference in the ECS task definition as a container secret.
+- `NEW_RELIC_APP_NAME`: Set as a container environment variable (e.g., `hello-world-dev`).
+- (Optional) `newrelic.yml`: The default file bundled in the image is sufficient; you can override via mounted file or environment.
+
+How New Relic is integrated
+- Infrastructure metrics arrive via AWS→New Relic integration (CloudWatch-based) once your AWS account is connected.
+- Application telemetry (transactions, errors, JVM metrics) arrives via the Java agent running inside the ECS task.
+
+How to access and view metrics
+- In New Relic → Infrastructure → AWS → ECS and ALB: view CPU/Memory, RequestCount, TargetResponseTime, and 5XX metrics.
+- In APM → select `NEW_RELIC_APP_NAME`: view transactions, error rates, traces, JVM metrics.
+- Use Data Explorer to run ad-hoc NRQL on `Metric`, `Transaction`, `TransactionError`, and `Log` (if logs are forwarded).
+
+Alert configuration
+- CPU (ECS service): use an NRQL condition such as:
+	- `FROM Metric SELECT latest(aws.ecs.CPUUtilization) WHERE aws.ecs.clusterName = 'hello-world-cluster' AND aws.ecs.serviceName = 'hello-world-service'`
+	- Static threshold: above 80 for 2 minutes.
+- Memory (ECS service):
+	- `FROM Metric SELECT latest(aws.ecs.MemoryUtilization) WHERE aws.ecs.clusterName = 'hello-world-cluster' AND aws.ecs.serviceName = 'hello-world-service'`
+	- Static threshold: above 80 for 2 minutes.
+- App errors (APM):
+	- `FROM TransactionError SELECT rate(count(*), 1 minute) WHERE appName = 'hello-world-dev'`
+	- Static threshold: above 1 for 5 minutes.
+- App errors (Logs — optional):
+	- `FROM Log SELECT count(*) WHERE service IN ('hello-world','hello-world-dev') AND level IN ('ERROR','FATAL')`
+	- Static threshold: above 1 for 5 minutes.
+
+CloudWatch Logs (Terraform and options)
+- Log groups can be provisioned via [infra/_envcommon/logs.hcl](infra/_envcommon/logs.hcl) using the official CloudWatch Log Group submodule.
+- To forward logs to New Relic, choose one:
+	- FireLens (Fluent Bit) on ECS tasks → New Relic Logs endpoint.
+	- CloudWatch Logs → Kinesis Firehose or Lambda forwarder to New Relic.
+- If you want code examples for FireLens or a log forwarder, I can add a dedicated stack under `infra/dev/us-east-1/logs/`.
+
+Dashboard screenshot
+
+![Alt text](newrelicdashboard.png)
+
+
+
 ### 2) Enable application error visibility (APM)
 
 The `app/hello-world` image already includes the New Relic Java agent. Provide the following at deploy time (ECS task definition):
