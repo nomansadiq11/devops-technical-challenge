@@ -2,6 +2,56 @@
 
 Infrastructure is managed with Terragrunt + official Terraform Registry modules (VPC, ALB, Security Groups, ECR, CloudWatch Logs, ECS Cluster/Service). Each stack is self-contained and composes via Terragrunt `dependency` outputs.
 
+## Contents
+- [Overview of the Infrastructure](#overview-of-the-infrastructure)
+- [Prerequisites and Setup](#prerequisites)
+- [Architecture Diagram](#architecture-diagram)
+- [How to Run Terraform](#how-to-run-terraform)
+- [How to Build and Deploy the Application](#how-to-build-and-deploy-the-application)
+- [Required AWS Credentials and Permissions](#required-aws-credentials-and-permissions)
+- [Required GitHub Secrets](#ci-cd-github-actions)
+- [New Relic Infrastructure (ECS)](#new-relic-infrastructure-ecs)
+- [Troubleshooting](#troubleshooting)
+
+## Overview of the Infrastructure
+- VPC + Subnets: [infra/dev/us-east-1/vpc/vpc1](infra/dev/us-east-1/vpc/vpc1)
+- Security Groups: [infra/dev/us-east-1/sgs/hello-world-alb-sg](infra/dev/us-east-1/sgs/hello-world-alb-sg), [infra/dev/us-east-1/sgs/hello-world-ecs-sg](infra/dev/us-east-1/sgs/hello-world-ecs-sg)
+- Load Balancer (ALB): [infra/dev/us-east-1/alb/hello-world-alb](infra/dev/us-east-1/alb/hello-world-alb)
+- ECR Repository: [infra/dev/us-east-1/ecr/hello-world](infra/dev/us-east-1/ecr/hello-world)
+- ECS Cluster: [infra/dev/us-east-1/ecs-clusters/hello-world-cluster](infra/dev/us-east-1/ecs-clusters/hello-world-cluster)
+- ECS Service (Fargate): [infra/dev/us-east-1/ecs-services/hello-world-service](infra/dev/us-east-1/ecs-services/hello-world-service)
+- CloudWatch Logs (optional): [infra/dev/us-east-1/logs](infra/dev/us-east-1/logs)
+- Shared module wiring: [infra/_envcommon](infra/_envcommon)
+
+Key characteristics:
+- Uses official terraform-aws-modules for all major components
+- ALB forwards traffic to an ECS Fargate service
+- Container image sourced from ECR
+- Least-privilege IAM with separate task execution vs application task roles
+
+## Architecture Diagram
+
+```
+					Internet
+						 |
+					 Route 53 (optional)
+						 |
+					 Application Load Balancer
+						 |
+				┌──── Target Group ────┐
+				│        (IP)          │
+				v                       v
+		  ECS Service (Fargate)  <—  ECS Cluster
+				│
+				│  pulls image from
+				v
+			Amazon ECR
+
+ CloudWatch Logs  ← ECS/ALB logs + metrics
+		 IAM        ← Task execution role + app task role
+		 VPC        ← Subnets, routing, security groups
+```
+
 ## Prerequisites
 - Terraform 1.5.7
 - Terragrunt (latest)
@@ -81,20 +131,20 @@ Apply in this order to satisfy dependencies:
 7) ECS Service
 	 - [infra/dev/us-east-1/ecs-services/hello-world-service](infra/dev/us-east-1/ecs-services/hello-world-service)
 
-## Running Terragrunt
+## How to Run Terraform
 From each stack directory:
 ```bash
 terragrunt init -upgrade
 terragrunt validate
 terragrunt plan
-# terragrunt apply
+terragrunt apply
 ```
 
 Tips:
 - For quicker `validate/plan` runs, stacks use `mock_outputs` for upstream dependencies; real values resolve on `apply`.
 - Remote state: export the variables listed in Prerequisites and re-run `terragrunt init`.
 
-## Container Image & ECR
+## How to Build and Deploy the Application
 - The ECS service references the ECR repo output and uses `:latest` by default.
 - To build and push an image after creating the ECR repo:
 ```bash
@@ -106,6 +156,25 @@ aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --
 docker build -f devops-technical-challenge/app/hello-world/Dockerfile -t $IMAGE .
 docker push $IMAGE
 ```
+
+- Deploy via Terragrunt by applying the ECS service stack:
+```bash
+cd infra/dev/us-east-1/ecs-services/hello-world-service
+terragrunt apply
+```
+- Or let CI/CD handle deploys on push to `main` via [.github/workflows/deploy.yml](.github/workflows/deploy.yml).
+
+## Required AWS Credentials and Permissions
+Your deploying identity (CLI/Terragrunt/GitHub Actions) needs permissions to manage these resources:
+- VPC/Subnets/SecurityGroups: ec2
+- ALB/Target Group/Listener: elasticloadbalancing (ELBv2)
+- ECR: ecr for repo creation and push/pull operations
+- ECS Cluster/Service/Task Definition: ecs
+- CloudWatch Logs: logs
+- IAM for ECS roles: iam:CreateRole, iam:AttachRolePolicy, iam:PassRole (limited to roles created for ECS)
+- S3 (optional, if your task accesses a bucket): s3:GetObject, s3:PutObject, s3:ListBucket on the specific bucket/prefix
+
+Recommendation: use a least-privilege role scoped to a project-specific prefix/tag rather than AdministratorAccess.
 
 ## Least-Privilege IAM
 - Task Execution Role: only the AWS-managed `AmazonECSTaskExecutionRolePolicy` (image pull + logs).
@@ -134,7 +203,89 @@ docker push $IMAGE
 	- Dev deploy job auto-registers a new task definition by cloning the current one and updating the image.
 	- Production job uses `environment: production`. Configure environment protection rules and required reviewers in GitHub → Settings → Environments to enforce manual approval.
 
+## New Relic Infrastructure (ECS)
+
+This project supports New Relic for both infrastructure metrics (via the AWS→New Relic integration) and application errors (via the New Relic Java agent already included in the container).
+
+### 1) Connect AWS to New Relic (Infrastructure)
+
+- In New Relic, go to Integrations → Amazon Web Services → Add an account.
+- Create the IAM role for New Relic using the guided CloudFormation flow (preferred) or Terraform. This grants New Relic read-only access to CloudWatch metrics including ECS and ALB.
+- Ensure the ECS namespace is enabled. Optionally enable Metric Streams for lower-latency metrics.
+
+Notes:
+- Do not commit license keys. The sample file at [newrelic-infra/newrelic-infra.yml](newrelic-infra/newrelic-infra.yml) should be replaced by secrets in AWS Secrets Manager or SSM Parameter Store and referenced from the ECS task definition.
+
+### 2) Enable application error visibility (APM)
+
+The `app/hello-world` image already includes the New Relic Java agent. Provide the following at deploy time (ECS task definition):
+- `NEW_RELIC_LICENSE_KEY`: Store in AWS Secrets Manager or SSM and surface via task definition secrets.
+- `NEW_RELIC_APP_NAME`: A friendly service name, for example `hello-world-dev`.
+
+Example (in the ECS service container definition):
+- Add environment: `NEW_RELIC_APP_NAME=hello-world-dev`.
+- Add secret (from Secrets Manager/SSM): `NEW_RELIC_LICENSE_KEY`.
+
+With these set, application errors/exceptions will appear in APM and Events (e.g., `TransactionError`).
+
+### 3) Optional: Logs for error alerts
+
+If you prefer to alert off logs (e.g., `level = ERROR`), forward logs to New Relic via:
+- FireLens (Fluent Bit) to New Relic Logs endpoint, or
+- CloudWatch Logs → New Relic logs forwarder (Lambda) or Kinesis Firehose.
+
+### 4) Create alerts in New Relic
+
+Create an Alert Policy (Alerts & AI → Policies) and add the following conditions. You can either:
+- Use the guided ECS conditions in the UI (recommended), or
+- Use NRQL conditions. The NRQL below are templates; validate metric names/dimensions in New Relic Data Explorer for your account, as naming can vary by integration mode.
+
+High CPU utilization (> 80%)
+- Condition type: NRQL
+- Query (template):
+	- Option A (CloudWatch-mapped metrics):
+		FROM Metric SELECT latest(aws.ecs.CPUUtilization)
+		WHERE aws.ecs.clusterName = 'hello-world-cluster'
+			AND aws.ecs.serviceName = 'hello-world-service'
+	- Option B (namespace/dimension form):
+		FROM Metric SELECT latest(`AWS/ECS.CPUUtilization`)
+		WHERE ClusterName = 'hello-world-cluster' AND ServiceName = 'hello-world-service'
+- Threshold: Static, above 80 for 2 consecutive minutes.
+
+High memory utilization (> 80%)
+- Condition type: NRQL
+- Query (template):
+	- Option A:
+		FROM Metric SELECT latest(aws.ecs.MemoryUtilization)
+		WHERE aws.ecs.clusterName = 'hello-world-cluster'
+			AND aws.ecs.serviceName = 'hello-world-service'
+	- Option B:
+		FROM Metric SELECT latest(`AWS/ECS.MemoryUtilization`)
+		WHERE ClusterName = 'hello-world-cluster' AND ServiceName = 'hello-world-service'
+- Threshold: Static, above 80 for 2 consecutive minutes.
+
+Application errors or exceptions
+- Option 1 — APM errors (requires Java agent):
+	- Query:
+		FROM TransactionError SELECT rate(count(*), 1 minute)
+		WHERE appName = 'hello-world-dev'
+	- Threshold: Static, above 1 for 5 minutes (tune to your baseline).
+- Option 2 — Logs (if forwarding logs):
+	- Query:
+		FROM Log SELECT count(*) WHERE service IN ('hello-world','hello-world-dev') AND level IN ('ERROR','FATAL')
+	- Threshold: Static, above 1 for 5 minutes.
+
+Routing and notifications
+- Attach your preferred notification channels (Email, Slack, Teams, Webhook). For production, consider separate policies/environments with stricter thresholds.
+
+Validation checklist
+- Data Explorer shows ECS and ALB metrics arriving for your AWS account.
+- APM shows transactions and any errors for `NEW_RELIC_APP_NAME`.
+- Test alerts by temporarily lowering thresholds or load-testing the service.
+
 ## Troubleshooting
 - If `region.hcl` doesn’t match your target region, provider operations may fall back to `AWS_REGION`. Keep them consistent.
 - Ensure ALB target group outputs exist before applying ECS service.
 - Confirm ECR image is pushed (and tag matches) before first ECS service rollout.
+ - Rotate any plaintext secrets committed accidentally (e.g., New Relic license key) and move them to AWS Secrets Manager/SSM.
+ - If `terragrunt` fails to find dependencies during `validate/plan`, ensure you are running from the correct stack folder and upstream stacks exist; mocks are used only for planning.
