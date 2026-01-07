@@ -11,6 +11,7 @@ Infrastructure is managed with Terragrunt + official Terraform Registry modules 
 - [Required AWS Credentials and Permissions](#required-aws-credentials-and-permissions)
 - [Required GitHub Secrets](#ci-cd-github-actions)
 - [New Relic Infrastructure (ECS)](#new-relic-infrastructure-ecs)
+- [Disaster Recovery](#disaster-recovery)
 - [Troubleshooting](#troubleshooting)
  - [Staging Environment](#staging-environment)
 
@@ -380,6 +381,69 @@ Validation checklist
 - Data Explorer shows ECS and ALB metrics arriving for your AWS account.
 - APM shows transactions and any errors for `NEW_RELIC_APP_NAME`.
 - Test alerts by temporarily lowering thresholds or load-testing the service.
+
+## Disaster Recovery
+This section documents backup and recovery procedures for the stateless Java application deployed on ECS Fargate. If your application uses external state (e.g., S3, RDS, DynamoDB), include those services in the backup plan.
+
+DR objectives
+- Define RPO (data loss tolerance) and RTO (time to restore). For a stateless web API, RPO ~ 0 and RTO ~ minutes are typical when images and infra are reproducible.
+
+Backups and replication
+- ECR images:
+	- Use immutable tags for releases (e.g., `v1.2.3`) in addition to `latest`.
+	- Enable ECR cross-region replication to a DR region.
+	- Keep a minimal set of “known good” tags for rollback.
+- Terraform remote state:
+	- Use an S3 bucket with versioning enabled and (optional) cross-region replication. See [infra/terragrunt.hcl](infra/terragrunt.hcl) for backend config.
+	- DynamoDB lock table: enable point-in-time recovery.
+- Application data (if used):
+	- S3: enable versioning and cross-region replication on buckets accessed by the app.
+	- RDS/DynamoDB: enable automated snapshots/backups and PITR.
+
+Operational runbooks
+- Roll back ECS service to previous task definition:
+```bash
+ECS_CLUSTER_NAME=hello-world-cluster
+ECS_SERVICE_NAME=hello-world-service
+
+# Get current task definition
+aws ecs describe-services \
+	--cluster "$ECS_CLUSTER_NAME" \
+	--services "$ECS_SERVICE_NAME" \
+	--query 'services[0].taskDefinition' --output text
+
+# List task definitions by family and pick the previous ARN
+aws ecs list-task-definitions \
+	--family-prefix "$ECS_SERVICE_NAME" \
+	--sort DESC --query 'taskDefinitionArns[0:5]'
+
+# Update service to use a previous task definition ARN
+aws ecs update-service \
+	--cluster "$ECS_CLUSTER_NAME" \
+	--service "$ECS_SERVICE_NAME" \
+	--task-definition arn:aws:ecs:us-east-1:ACCOUNT_ID:task-definition/hello-world-service:REV \
+	--force-new-deployment
+```
+- Restore from a known-good image tag:
+```bash
+AWS_REGION=us-east-1 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+IMAGE_URI=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/hello-world:v1.2.3
+
+# Re-register task definition with the stable image
+TD_ARN=$(aws ecs describe-services --cluster "$ECS_CLUSTER_NAME" --services "$ECS_SERVICE_NAME" --query 'services[0].taskDefinition' --output text)
+aws ecs describe-task-definition --task-definition "$TD_ARN" --include TAGS \
+	| jq '.taskDefinition.containerDefinitions |= map(.image = env.IMAGE_URI) | {family: .taskDefinition.family, taskRoleArn: .taskDefinition.taskRoleArn, executionRoleArn: .taskDefinition.executionRoleArn, networkMode: .taskDefinition.networkMode, containerDefinitions: .taskDefinition.containerDefinitions, volumes: .taskDefinition.volumes, placementConstraints: .taskDefinition.placementConstraints, requiresCompatibilities: .taskDefinition.requiresCompatibilities, cpu: .taskDefinition.cpu, memory: .taskDefinition.memory, runtimePlatform: .taskDefinition.runtimePlatform, ephemeralStorage: .taskDefinition.ephemeralStorage}' > td.json
+NEW_TD_ARN=$(aws ecs register-task-definition --cli-input-json file://td.json --query 'taskDefinition.taskDefinitionArn' --output text)
+aws ecs update-service --cluster "$ECS_CLUSTER_NAME" --service "$ECS_SERVICE_NAME" --task-definition "$NEW_TD_ARN" --force-new-deployment
+```
+- Region failover (active/passive):
+	- Provision a parallel stack in a DR region (e.g., `us-west-2`) using the same [infra/_envcommon](infra/_envcommon) modules.
+	- Use Route 53 failover records with health checks targeting the ALB in the primary region; switch to DR when primary is unhealthy.
+	- Keep ECR replication and SSM/Secrets synchronized across regions.
+
+Testing and validation
+- Conduct periodic DR drills: simulate rollback and regional failover.
+- Verify RPO/RTO targets and refine alerts/runbooks accordingly.
 
 ## Troubleshooting
 - If `region.hcl` doesn’t match your target region, provider operations may fall back to `AWS_REGION`. Keep them consistent.
